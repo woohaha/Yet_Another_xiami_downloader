@@ -1,28 +1,39 @@
 #!/usr/bin/env python
 
-import requests
 import re
 import os
+import sys
 import json
 import urllib
+import requests
 import concurrent.futures
+
+DEBUG=False
 
 class song_info():
     '''
     找出一首歌的信息
     例：http://www.xiami.com/song/1772432927?spm=a1z1s.6659513.0.0.eCXGhY
     '''
-    def __init__(self,song_url):
-        self.song_id=re.findall(r'\d+',song_url)[0]
+    # album: 'http://www.xiami.com/song/playlist/id/497547065/type/1/cat/json?_ksTS=1397783765633_689&callback=jsonp690'
+    # collection: 'http://www.xiami.com/song/playlist/id/30070469/type/3/cat/json?_ksTS=1397784599970_689&callback=jsonp690'
+    def __init__(self,page):
+        self.page_id=re.findall(r'\d+',page)[0]
         header={'User-Agent':'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:28.0) Gecko/20100101 Firefox/28.0',
-                'referer':'http://www.xiami.com/play?ids=/song/playlist/id/{}/object_name/default/object_id/0'.format(self.song_id)}
-        self.json_url='http://www.xiami.com/song/playlist/id/{}/object_name/default/object_id/0/cat/json?callback=json'.format(self.song_id)
+                'referer':'http://www.xiami.com'} #play?ids=/song/playlist/id/{}/object_name/default/object_id/0'.format(self.song_id)}
+        self.album_name_of_collection=False
+        if 'album' in page:
+            self.json_url='http://www.xiami.com/song/playlist/id/{}/type/1/cat/json?_ksTS=1397783765633_689&callback=json'.format(self.page_id)
+        elif 'showcollect' in page:
+            self.json_url='http://www.xiami.com/song/playlist/id/{}/type/3/cat/json?_ksTS=1397783765633_689&callback=json'.format(self.page_id)
+            self.album_name_of_collection='Collection_'+self.page_id
+        elif 'song' in page:
+            self.json_url='http://www.xiami.com/song/playlist/id/{}/object_name/default/object_id/0/cat/json?callback=json'.format(self.page_id)
+        else:
+            raise Exception('Not a Vaild URL')
         req=requests.get(self.json_url,headers=header)
-        self.song_info_json=json.loads(req.text[6:-1])
-
-        self.album_name=self.song_info_json['data']['trackList'][0]['album_name']
-        self.artist=self.song_info_json['data']['trackList'][0]['artist']
-        self.song_title=self.song_info_json['data']['trackList'][0]['title']
+        self.page_json=json.loads(req.text[6:-1])
+        self.songs=[]
 
         def caesar(location):
             '''
@@ -35,18 +46,35 @@ class song_info():
             result.extend([location[(avg_len + 1) * remainder:][i * avg_len + 1: (i + 1) * avg_len + 1] for i in
                            range(num - remainder)])
             url = urllib.parse.unquote(''.join([''.join([result[j][i] for j in range(num)]) for i in range(avg_len)]) + \
-                                 ''.join([result[r][-1] for r in range(remainder)])).replace('^', '0')
+                                       ''.join([result[r][-1] for r in range(remainder)])).replace('^', '0')
             return url
 
-        self.url=caesar(self.song_info_json['data']['trackList'][0]['location'])
-        self.song={self.song_title+'_'+self.artist:self.url}
+        try:
+
+            for song in self.page_json['data']['trackList']:
+                self.album_name_of_song=song['album_name'].replace(' ','_')
+                self.artist=song['artist'].replace(' ','_')
+                self.song_title=song['title'].replace(' ','_')
+                self.url=caesar(song['location'])
+                self.filename=str(self.page_json['data']['trackList'].index(song)+1)+'.'+self.song_title+'-'+self.album_name_of_song
+                self.songs.append((self.filename,self.url))
+
+            if self.album_name_of_collection:
+                self.album_name=self.album_name_of_collection
+            else:
+                self.album_name=self.album_name_of_song
+        except TypeError:
+            print('The Album Has Been Deleted.')
+
 
 def MT_download(download_dir, song_addrs, classified, workers=3):
-    def download(song_addr, img_index):# 真正工作的下載函數
+    def download(song_addr, filename):# 真正工作的下載函數
 
         PATH = ''.join((classified_PATH,
-                        str(img_index + 1).zfill(2), '_',
-                        os.path.basename(song_addr))) # 構造保存地址
+                        filename,'.mp3')) # 構造保存地址
+        if DEBUG:
+            print('{},{}'.format(PATH,song_addr))
+            sys.exit(0)
         try:
             img_status = os.stat(PATH).st_size
         except FileNotFoundError:
@@ -75,7 +103,7 @@ def MT_download(download_dir, song_addrs, classified, workers=3):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futureIteams = {executor.submit(
-            download, item, song_addrs.index(item)): item for item in song_addrs}
+            download, item[1], item[0]): item[0] for item in song_addrs}
         for future in concurrent.futures.as_completed(futureIteams):
             url = futureIteams[future]
             try:
@@ -84,9 +112,16 @@ def MT_download(download_dir, song_addrs, classified, workers=3):
                     failed.remove(url)
             except Exception as exc:
                 print('{} generated an exception: {}'.format(url, exc))
-                failed.add(url) # 多線程執行下載函
+                failed.add(url) # 多線程執行下載函lvok
 
-failed={}
+failed=set()
+
 if __name__=='__main__':
-    a=song_info('http://www.xiami.com/song/1769544090?spm=a1z1s.3061781.0.0.JRatOo&from=similar_song')
-    print(a.song)
+    try:
+        url=sys.argv[1]
+    except IndexError:
+        url=input('Xiami URL:')
+
+    a=song_info(url)
+    download_dir=os.path.expanduser('~')+'/Music/'
+    MT_download(download_dir,a.songs,a.album_name)
